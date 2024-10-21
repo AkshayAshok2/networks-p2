@@ -1,8 +1,8 @@
 /*///////////////////////////////////////////////////////////
 *
 * FILE:		client.c
-* AUTHOR:	Akshay Ashok
-* PROJECT:	CNT 4007 Project 1 - Professor Traynor
+* AUTHORS:	Akshay Ashok and Joshua Thomas
+* PROJECT:	CNT 4007 Project 2 - Professor Traynor
 * DESCRIPTION:	Network Client Code
 *
 *////////////////////////////////////////////////////////////
@@ -15,18 +15,26 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <glib.h>
 #include <openssl/evp.h>	    /* for OpenSSL EVP digest libraries/SHA256 */
 
 /* Constants */
 #define RCVBUFSIZE 512		    /* The receive buffer size */
 #define SNDBUFSIZE 512		    /* The send buffer size */
 #define MDLEN 32
+#define DATA_DIR "client_files"
 
 void fatal_error(char *message)
 {
     perror(message);
     exit(1);
 }
+
+typedef struct {
+    int id;
+    char type;
+    char *content;
+} message;
 
 /* The main function */
 int main(int argc, char *argv[])
@@ -36,26 +44,20 @@ int main(int argc, char *argv[])
     struct sockaddr_in serv_addr;   /* The server address */
     struct sockaddr_in client_addr; /* The client address */
 
-    char *studentName;		    /* Your Name */
+    char *listedFiles;
 
     char sndBuf[SNDBUFSIZE];	    /* Send Buffer */
     char rcvBuf[RCVBUFSIZE];	    /* Receive Buffer */
     
     int i;			    /* Counter Value */
-    int servPort = 8080;
+    int servPort = 10000;
     char *servIP = "127.0.0.1";
-
-    /* Get the Student Name from the command line */
-    if (argc != 2) 
-    {
-        printf("Incorrect input format. The correct format is:\n\tnameChanger your_name\n");
-        exit(1);
-    }
-    studentName = argv[1];
+    
+    
     memset(&sndBuf, 0, RCVBUFSIZE);
     memset(&rcvBuf, 0, RCVBUFSIZE);
 
-    msgLen = strlen(studentName);
+    msgLen = 0;
     strncpy(sndBuf, studentName, msgLen);
     sndBuf[msgLen] = '\0';
 
@@ -72,27 +74,52 @@ int main(int argc, char *argv[])
     /* Establish connection to the server */
     if (connect(clientSock, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
         fatal_error("connect() failed");
-    
-    /* Send the string to the server */
-    if (send(clientSock, sndBuf, msgLen, 0) != msgLen)
-        fatal_error("send() sent unexpected number of bytes");
 
-    /* Receive and print response from the server */
-    int receivedBytes = 1;
-    while (receivedBytes > 0) {
-        if ((receivedBytes = recv(clientSock, rcvBuf, RCVBUFSIZE - 1, 0)) < 0) {
-            fatal_error("recv() failed");
+    printf("Welcome to UFmyMusic!\n");
+    
+    while (1) {
+        printf("Select an option:\n1. LIST\n2. DIFF\n3. PULL\n4. LEAVE\n");
+
+        int option;
+        scanf("%d", &option);
+
+        switch (option) {
+            case 1:
+                strcpy(sndBuf, "LIST");
+                msgLen = strlen(sndBuf);
+                break;
+            case 2:
+                strcpy(sndBuf, "DIFF");
+                msgLen = strlen(sndBuf);
+                break;
+            case 3:
+                strcpy(sndBuf, "PULL");
+                msgLen = strlen(sndBuf);
+                break;
+            case 4:
+                strcpy(sndBuf, "LEAVE");
+                msgLen = strlen(sndBuf);
+                break;
+            default:
+                printf("Invalid option. Please try again.\n");
+                continue;
         }
+        /*
+        // Send the string to the server
+        if (send(clientSock, sndBuf, msgLen, 0) != msgLen)
+            fatal_error("send() sent unexpected number of bytes");
+
+        // Receive and print response from the server
+        int receivedBytes = 1;
+        while (receivedBytes > 0) {
+            if ((receivedBytes = recv(clientSock, rcvBuf, RCVBUFSIZE - 1, 0)) < 0) {
+                fatal_error("recv() failed");
+            }
+        }
+        */
     }
 
     close(clientSock);
-    rcvBuf[receivedBytes] = '\0';
-
-    printf("%s\n", studentName);
-    printf("Transformed input is: ");
-    for(i = 0; i < MDLEN; i++) printf("%02x", rcvBuf[i]);
-    printf("\n");
-
     return 0;
 }
 

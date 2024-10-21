@@ -1,13 +1,13 @@
 /*///////////////////////////////////////////////////////////
 *
 * FILE:		server.c
-* AUTHOR:	Akshay Ashok
-* PROJECT:	CNT 4007 Project 1 - Professor Traynor
+* AUTHORS:	Akshay Ashok and Joshua Thomas
+* PROJECT:	CNT 4007 Project 2 - Professor Traynor
 * DESCRIPTION:	Network Server Code
 *
 *////////////////////////////////////////////////////////////
 
-/*Included libraries*/
+/* Included libraries */
 
 #include <stdio.h>	  /* for printf() and fprintf() */
 #include <sys/socket.h>	  /* for socket(), connect(), send(), and recv() */
@@ -20,6 +20,7 @@
 #define RCVBUFSIZE 512		/* The receive buffer size */
 #define SNDBUFSIZE 512		/* The send buffer size */
 #define BUFSIZE 40		/* Your name can be as many as 40 chars*/
+#define DATA_DIR "server_files"
 
 void fatal_error(char *message)
 {
@@ -44,7 +45,7 @@ int main(int argc, char *argv[])
   const EVP_MD *md;				/* Digest data structure declaration */
   int md_len;					/* Digest data structure size tracking */
 
-  changeServPort = 9090;
+  changeServPort = 10000;
 
   /* Create new TCP Socket for incoming requests*/
   if ((serverSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
