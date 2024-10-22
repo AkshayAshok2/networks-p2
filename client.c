@@ -8,7 +8,6 @@
 *////////////////////////////////////////////////////////////
 
 /* Included libraries */
-
 #include <stdio.h>		    /* for printf() and fprintf() */
 #include <sys/socket.h>		    /* for socket(), connect(), send(), and recv() */
 #include <arpa/inet.h>		    /* for sockaddr_in and inet_addr() */
@@ -27,12 +26,7 @@
 #define DATA_DIR "./client_files"
 #define FILE_READ_BUFSIZE 1024
 
-void fatal_error(char *message)
-{
-    perror(message);
-    exit(1);
-}
-
+/* Struct definitions */
 typedef struct {
     uint8_t fileNameBytes;
     char fileName[RCVBUFSIZE];
@@ -52,291 +46,12 @@ typedef struct {
     char *fileHash;
 } diff;
 
-listMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf) {
-    int option = 1;
-
-    if (send(clientSock, &option, sizeof(option), 0) != sizeof(option)) {
-        printf("Number of bytes sent: %d\n", (int)sizeof(option));
-        fatal_error("send() sent unexpected number of bytes");
-    }
-
-    uint8_t bytesReceived = recv(clientSock, serverFileCount, sizeof(uint8_t), 0);
-
-    if (bytesReceived < 0)
-        fatal_error("First recv() failed");
-    else if (bytesReceived == 0)
-        fatal_error("Connection closed by server.\n");
-
-    uint32_t totalMessageSize = *serverFileCount * sizeof(listMessageResponse);
-
-    if (rcvBuf != NULL) {
-        free(rcvBuf);
-    }
-
-    rcvBuf = (char *)malloc(totalMessageSize);
-
-    if (rcvBuf == NULL) {
-        fatal_error("malloc() failed for rcvBuf");
-    }
-    
-    memset(rcvBuf, 0, totalMessageSize);
-    int totalBytesReceived = 0;
-
-    while (totalBytesReceived < totalMessageSize) {
-        bytesReceived = recv(clientSock, rcvBuf + totalBytesReceived, totalMessageSize - totalBytesReceived, 0);
-
-        if (bytesReceived < 0)
-            fatal_error("recv() for file names and hashes failed");
-        else if (bytesReceived == 0)
-            printf("No more bytes received. Ending recv() loop.\n");
-            break;
-
-        totalBytesReceived += bytesReceived;
-    }
-    
-    listMessageResponse *serverFiles = (listMessageResponse *)malloc(totalMessageSize);
-
-    if (serverFiles == NULL)
-        fatal_error("malloc() failed for serverFiles");
-
-    int offset = 0;
-    // Deserialize each listMessageResponse
-    for (int i = 0; i < *serverFileCount; i++) {
-        listMessageResponse *response = &serverFiles[i];
-
-        // Initialize the listMessageResponse structure to zero
-        memset(response, 0, sizeof(listMessageResponse));
-
-        // Deserialize fileNameBytes
-        memcpy(&response->fileNameBytes, rcvBuf + offset, sizeof(uint8_t));
-        offset += sizeof(uint8_t);
-
-        // Deserialize fileName
-        memcpy(response->fileName, rcvBuf + offset, response->fileNameBytes);
-        response->fileName[response->fileNameBytes] = '\0';
-        offset += RCVBUFSIZE;
-
-        // Deserialize fileHashBytes
-        memcpy(&response->fileHashBytes, rcvBuf + offset, sizeof(uint8_t));
-        offset += sizeof(uint8_t);
-
-        // Deserialize fileHash
-        memcpy(response->fileHash, rcvBuf + offset, response->fileHashBytes);
-        response->fileHash[response->fileHashBytes] = '\0';
-        offset += RCVBUFSIZE;
-    }
-
-    free(rcvBuf);
-    return serverFiles;
-}
-
-char* calculateSHA256(const char* filePath){
-    //open file in binary mode
-    FILE* file = fopen(filePath, "rb");
-    if(!file){
-    perror("fopen");
-    return NULL;
-    }
-
-    //Initialize EVP context for SHA256
-    EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
-    if(mdctx == NULL){
-    perror("EVP_MD_CTX_new");
-    fclose(file);
-    return NULL;
-    }
-
-    //Initialize SHA256 algorithm
-    if(EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1){
-    perror("EVP_DigestInit_ex");
-    EVP_MD_CTX_free(mdctx);
-    fclose(file);
-    return NULL;
-    }
-
-    //Read the file in chunks and update the hash calculation
-    unsigned char buffer[FILE_READ_BUFSIZE];
-    size_t bytesRead;
-    while((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0){
-        if(EVP_DigestUpdate(mdctx, buffer, bytesRead) != 1){
-            perror("EVP_DigestUpdate");
-            EVP_MD_CTX_free(mdctx);
-            fclose(file);
-            return NULL;
-        }
-    }
-
-    //Finalize Hash Calculation
-    unsigned char hash[EVP_MAX_MD_SIZE];
-    unsigned int hashLength;
-
-    if(EVP_DigestFinal_ex(mdctx, hash, &hashLength) != 1){
-        perror("EVP_DigestFinal_ex");
-        EVP_MD_CTX_free(mdctx);
-        fclose(file);
-        return NULL;
-    }
-
-    //Convert hash to hexadecimal
-    char* hashString = malloc(hashLength * 2 + 1);
-    if(hashString == NULL){
-        perror("malloc");
-        EVP_MD_CTX_free(mdctx);
-        fclose(file);
-        return NULL;
-    }
-
-    for(unsigned int i = 0; i < hashLength; i++){
-        sprintf(hashString + (i * 2), "%02x", hash[i]);
-    }
-
-    hashString[hashLength * 2] = '\0';
-    EVP_MD_CTX_free(mdctx);
-    fclose(file);
-    return hashString;
-}
-
-listMessageResponse* getFileNamesAndHashes(int *fileCount) {
-    DIR *currentDir;
-    struct dirent *entry;
-    char filePath[1024];
-    int capacity = 10; // Initial capacity for storing file info
-
-    listMessageResponse* fileInfos = malloc(capacity * sizeof(listMessageResponse));
-    if (fileInfos == NULL) {
-        perror("malloc");
-        return NULL;
-    }
-
-    if ((currentDir = opendir(DATA_DIR)) == NULL) {
-        perror("opendir() error");
-        free(fileInfos);
-        return NULL;
-    }
-    
-    // Loop through each entry in the directory
-    while ((entry = readdir(currentDir)) != NULL) {
-        snprintf(filePath, sizeof(filePath), "%s/%s", DATA_DIR, entry->d_name);
-        struct stat fileStat;
-        if (stat(filePath, &fileStat) == 0 && S_ISREG(fileStat.st_mode)) {
-            // Double size if capacity is reached
-            if (*fileCount >= capacity) {
-                capacity *= 2;
-                listMessageResponse* temp = realloc(fileInfos, capacity * sizeof(listMessageResponse));
-                if (temp == NULL) {
-                    perror("realloc");
-                    closedir(currentDir);
-                    free(fileInfos);
-                    return NULL;
-                }
-                fileInfos = temp;
-            }
-
-            // Copy file name
-            strncpy(fileInfos[*fileCount].fileName, entry->d_name, RCVBUFSIZE - 1);
-            fileInfos[*fileCount].fileName[RCVBUFSIZE - 1] = '\0';
-            fileInfos[*fileCount].fileNameBytes = (uint8_t)strlen(entry->d_name);
-            printf("%s\n", fileInfos[*fileCount].fileName);
-
-            // Calculate and copy SHA-256 hash
-            char* sha256 = calculateSHA256(filePath);
-
-            if (sha256 != NULL) {
-                strncpy(fileInfos[*fileCount].fileHash, sha256, RCVBUFSIZE - 1);
-                fileInfos[*fileCount].fileHash[RCVBUFSIZE - 1] = '\0';
-                fileInfos[*fileCount].fileHashBytes = (uint8_t)strlen(sha256);
-                printf("%s\n", fileInfos[*fileCount].fileHash);
-                free(sha256);
-            } else {
-                fprintf(stderr, "Failed to calculate SHA256 for file: %s\n", entry->d_name);
-                continue;
-            }
-
-            fileCount++;
-        }
-    }
-
-    closedir(currentDir);
-    return fileInfos; // Return array of FileInfo
-
-}
-/*
-void DIFF(listMessageResponse *serverFiles, int serverFileCount, listMessageResponse **clientFiles, int *clientFileCount) {
-    DIR *dir;
-    struct dirent *ent;
-    *clientFileCount = 0;
-
-    if ((dir = opendir(DATA_DIR)) != NULL) {
-        // Count the number of files
-        while ((ent = readdir(dir)) != NULL) {
-            if (ent->d_type == DT_REG) {
-                (*clientFileCount)++;
-            }
-        }
-        closedir(dir);
-    } else {
-        perror("opendir");
-        return;
-    }
-
-    *clientFiles = (listMessageResponse *)malloc((*clientFileCount) * sizeof(listMessageResponse));
-    if (*clientFiles == NULL) {
-        fatal_error("malloc() failed for clientFiles");
-    }
-
-    if ((dir = opendir(DATA_DIR)) != NULL) {
-        int index = 0;
-        while ((ent = readdir(dir)) != NULL) {
-            if (ent->d_type == DT_REG) {
-                listMessageResponse *response = &(*clientFiles)[index];
-                memset(response, 0, sizeof(listMessageResponse));
-
-                response->fileNameBytes = strlen(ent->d_name);
-                strncpy(response->fileName, ent->d_name, response->fileNameBytes);
-                response->fileName[response->fileNameBytes] = '\0';
-
-                char filePath[RCVBUFSIZE];
-                snprintf(filePath, sizeof(filePath), "%s/%s", DATA_DIR, ent->d_name);
-
-                response->fileHashBytes = SHA256_DIGEST_LENGTH * 2;
-                compute_file_sha256(filePath, response->fileHash);
-                response->fileHash[response->fileHashBytes] = '\0';
-
-                index++;
-            }
-        }
-        closedir(dir);
-    } else {
-        perror("opendir");
-        return;
-    }
-
-    printf("Files on both machines:\n");
-    for (int i = 0; i < serverFileCount; i++) {
-        for (int j = 0; j < *clientFileCount; j++) {
-            if (strcmp(serverFiles[i].fileHash, (*clientFiles)[j].fileHash) == 0) {
-                printf("File: %s\n", serverFiles[i].fileName);
-            }
-        }
-    }
-
-    printf("Files missing on the client:\n");
-    for (int i = 0; i < serverFileCount; i++) {
-        int found = 0;
-        for (int j = 0; j < *clientFileCount; j++) {
-            if (strcmp(serverFiles[i].fileHash, (*clientFiles)[j].fileHash) == 0) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            printf("File: %s\n", serverFiles[i].fileName);
-        }
-    }
-}
-
-void PULL();
-*/
+/* Function prototypes */
+void fatal_error(char *message);
+listMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf);
+char* calculateSHA256(const char* filePath);
+listMessageResponse* getFileNamesAndHashes(uint8_t *fileCount);
+void DIFF(listMessageResponse *serverFiles, int serverFileCount, listMessageResponse *clientFiles, uint8_t *clientFileCount);
 
 /* The main function */
 int main(int argc, char *argv[])
@@ -346,12 +61,9 @@ int main(int argc, char *argv[])
     struct sockaddr_in serv_addr;   /* The server address */
     struct sockaddr_in client_addr; /* The client address */
 
-    char *listedFiles;
-
-    char *sndBuf;	    /* Send Buffer */
     char *rcvBuf;	    /* Receive Buffer */
 
-    int servPort = 20000;
+    int servPort = 25000;
     char *servIP = "127.0.0.1";
 
     uint8_t serverFileCount;
@@ -378,18 +90,25 @@ int main(int argc, char *argv[])
     printf("Welcome to UFmyMusic!\n");
     
     while (1) {
-        printf("Select an option:\n1. LIST\n2. DIFF\n3. PULL\n4. LEAVE\n");
-
-        int option;
-        scanf("%d", &option);
+        printf("\nSelect an option:\n1. LIST\n2. DIFF\n3. PULL\n4. LEAVE\n");
+        uint8_t option;
+        scanf("%hhu", &option);
 
         switch (option) {
             case 1:
                 /*---------- LIST ----------*/
+                if (serverFiles != NULL) {
+                    free(serverFiles);
+                    serverFiles = NULL;
+                }
+
                 serverFiles = LIST(clientSock, &serverFileCount, rcvBuf);
 
-                if (serverFiles == NULL || serverFileCount == 0) {
-                    printf("LIST failed. Exiting...\n");
+                if (serverFiles == NULL) {
+                    printf("serverFiles is NULL. Exiting...\n");
+                    break;
+                } else if (serverFileCount == 0) {
+                    printf("serverFileCount is 0. Exiting...\n");
                     break;
                 }
 
@@ -405,48 +124,319 @@ int main(int argc, char *argv[])
                 /*---------- DIFF ----------*/
                 if (serverFileCount == 0 || serverFiles == NULL) {
                     printf("LIST has not been called yet. Doing so now...\n");
+
+                    if (serverFiles != NULL) {
+                        free(serverFiles);
+                        serverFiles = NULL;
+                    }
+
                     serverFiles = LIST(clientSock, &serverFileCount, rcvBuf);
+
+                    if (serverFiles == NULL || serverFileCount == 0) {
+                        printf("LIST failed. Exiting...\n");
+                        break;
+                    }
                 }
 
+                if (clientFiles != NULL) {
+                    free(clientFiles);
+                    clientFiles = NULL;
+                }
+
+                DIFF(serverFiles, serverFileCount, clientFiles, &clientFileCount);
                 break;
             case 3:
                 /*---------- PULL ----------*/
-                // Send the integer 1 to the server
+                // Send 3 to the server
                 if (send(clientSock, &option, sizeof(option), 0) != sizeof(option))
                     fatal_error("send() sent unexpected number of bytes");
                 break;
             case 4:
                 /*---------- LEAVE ----------*/
-                close(clientSock);
+                // Send 4 to the server
+                if (send(clientSock, &option, sizeof(option), 0) != sizeof(option))
+                    fatal_error("send() sent unexpected number of bytes");
+
                 // Free the allocated memory for each fileName and fileHash
-                if (serverFileCount > 0 && serverFiles != NULL) {
-                    for (int i = 0; i < serverFileCount; i++) {
-                        free(serverFiles[i].fileName);
-                        free(serverFiles[i].fileHash);
-                    }
+                if (serverFiles != NULL) {
                     free(serverFiles);
                 }
-                break;
+
+                if (clientFiles != NULL) {
+                    free(clientFiles);
+                }
+
+                close(clientSock);
+                return 0;
             default:
                 printf("Invalid option. Please try again.\n");
                 continue;
         }
-        /*
-        // Send the string to the server
-        if (send(clientSock, sndBuf, msgLen, 0) != msgLen)
-            fatal_error("send() sent unexpected number of bytes");
-
-        // Receive and print response from the server
-        int receivedBytes = 1;
-        while (receivedBytes > 0) {
-            if ((receivedBytes = recv(clientSock, rcvBuf, RCVBUFSIZE - 1, 0)) < 0) {
-                fatal_error("recv() failed");
-            }
-        }
-        */
     }
 
-    close(clientSock);
     return 0;
 }
 
+/* Function to handle errors */
+void fatal_error(char *message)
+{
+    perror(message);
+    exit(1);
+}
+
+/* Function to handle LIST command */
+listMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf) {
+    // Clean up if previously run
+    if (rcvBuf != NULL) {
+        free(rcvBuf);
+        rcvBuf = NULL;
+    }
+
+    uint8_t option = 1;
+
+    if (send(clientSock, &option, sizeof(option), 0) != sizeof(option))
+        fatal_error("send() sent unexpected number of bytes");
+
+    uint8_t bytesReceived = recv(clientSock, serverFileCount, sizeof(uint8_t), 0);
+
+    if (bytesReceived < 0)
+        fatal_error("First recv() failed");
+    else if (bytesReceived == 0)
+        fatal_error("Connection closed by server for first byte.\n");
+
+    uint32_t totalMessageSize = *serverFileCount * sizeof(listMessageResponse);
+
+    if (rcvBuf != NULL)
+        free(rcvBuf);
+
+    rcvBuf = (char *)malloc(totalMessageSize);
+
+    if (rcvBuf == NULL)
+        fatal_error("malloc() failed for rcvBuf");
+    
+    memset(rcvBuf, 0, totalMessageSize);
+    int totalBytesReceived = 0;
+
+    while (totalBytesReceived < totalMessageSize) {
+        bytesReceived = recv(clientSock, rcvBuf + totalBytesReceived, totalMessageSize - totalBytesReceived, 0);
+
+        if (bytesReceived < 0)
+            fatal_error("recv() for file names and hashes failed");
+        else if (bytesReceived == 0)
+            printf("??? stopping here.\n");
+            break;
+
+        totalBytesReceived += bytesReceived;
+    }
+    
+    listMessageResponse *serverFiles = (listMessageResponse *)malloc(totalMessageSize);
+
+    if (serverFiles == NULL)
+        fatal_error("malloc() failed for serverFiles");
+
+    int offset = 0;
+
+    // Deserialize each listMessageResponse
+    for (int i = 0; i < *serverFileCount; i++) {
+        listMessageResponse *response = &serverFiles[i];
+
+        memset(response, 0, sizeof(listMessageResponse));
+
+        // Deserialize fileNameBytes
+        memcpy(&response->fileNameBytes, rcvBuf + offset, sizeof(uint8_t));
+        offset += sizeof(uint8_t);
+
+        // Deserialize fileName
+        memcpy(response->fileName, rcvBuf + offset, response->fileNameBytes);
+        offset += RCVBUFSIZE;
+
+        // Deserialize fileHashBytes
+        memcpy(&response->fileHashBytes, rcvBuf + offset, sizeof(uint8_t));
+        offset += sizeof(uint8_t);
+
+        // Deserialize fileHash
+        memcpy(response->fileHash, rcvBuf + offset, response->fileHashBytes);
+        offset += RCVBUFSIZE;
+    }
+
+    free(rcvBuf);
+    return serverFiles;
+}
+
+/* Returns null-terminated SHA256 hash */
+char* calculateSHA256(const char* filePath){
+    // Open file in binary mode
+    FILE* file = fopen(filePath, "rb");
+
+    if (!file) {
+        perror("fopen");
+        return NULL;
+    }
+
+    // Initialize EVP context for SHA256
+    EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+    if(mdctx == NULL){
+        perror("EVP_MD_CTX_new");
+        fclose(file);
+        return NULL;
+    }
+
+    // Initialize SHA256 algorithm
+    if(EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1){
+        perror("EVP_DigestInit_ex");
+        EVP_MD_CTX_free(mdctx);
+        fclose(file);
+        return NULL;
+    }
+
+    // Read the file in chunks and update the hash calculation
+    unsigned char buffer[FILE_READ_BUFSIZE];
+    size_t bytesRead;
+    while((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0){
+        if(EVP_DigestUpdate(mdctx, buffer, bytesRead) != 1){
+            perror("EVP_DigestUpdate");
+            EVP_MD_CTX_free(mdctx);
+            fclose(file);
+            return NULL;
+        }
+    }
+
+    // Finalize Hash Calculation
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hashLength;
+
+    if (EVP_DigestFinal_ex(mdctx, hash, &hashLength) != 1) {
+        perror("EVP_DigestFinal_ex");
+        EVP_MD_CTX_free(mdctx);
+        fclose(file);
+        return NULL;
+    }
+
+    // Convert hash to hexadecimal
+    char* hashString = malloc(hashLength * 2 + 1);
+    if (hashString == NULL) {
+        perror("malloc");
+        EVP_MD_CTX_free(mdctx);
+        fclose(file);
+        return NULL;
+    }
+
+    for (unsigned int i = 0; i < hashLength; i++) {
+        sprintf(hashString + (i * 2), "%02x", hash[i]);
+    }
+
+    // Null-terminate hash string
+    hashString[hashLength * 2] = '\0';
+    EVP_MD_CTX_free(mdctx);
+    fclose(file);
+
+    return hashString;
+}
+
+/* Returns populated list of `listMessagResponse` structs */
+listMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
+    DIR *currentDir;
+    struct dirent *entry;
+    char filePath[1024];
+    int capacity = 10; // Initial capacity for storing file info
+    uint8_t currFileCount = 0;
+
+    listMessageResponse* fileInfos = malloc(capacity * sizeof(listMessageResponse));
+
+    if (fileInfos == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+
+    memset(fileInfos, 0, capacity * sizeof(listMessageResponse));
+
+    if ((currentDir = opendir(DATA_DIR)) == NULL) {
+        perror("opendir() error");
+        free(fileInfos);
+        return NULL;
+    }
+    
+    // Loop through each entry in the directory
+    while ((entry = readdir(currentDir)) != NULL) {
+        snprintf(filePath, sizeof(filePath), "%s/%s", DATA_DIR, entry->d_name);
+        struct stat fileStat;
+
+        if (stat(filePath, &fileStat) == 0 && S_ISREG(fileStat.st_mode)) {
+            // Double size if capacity is reached
+            if (*fileCount >= capacity) {
+                int newCapacity = capacity * 2;
+                listMessageResponse* temp = realloc(fileInfos, newCapacity * sizeof(listMessageResponse));
+                memset(temp + capacity, 0, capacity * sizeof(listMessageResponse));
+
+                if (temp == NULL) {
+                    perror("realloc");
+                    closedir(currentDir);
+                    free(fileInfos);
+                    return NULL;
+                }
+
+                fileInfos = temp;
+                capacity = newCapacity;
+            }
+
+            // Copy file name into struct (`d_name` already null-terminated)
+            uint8_t fileNameBytes = (uint8_t)(strlen(entry->d_name) + 1); // +1 for null terminator
+            strncpy(fileInfos[currFileCount].fileName, entry->d_name, fileNameBytes);
+            fileInfos[currFileCount].fileNameBytes = fileNameBytes;
+
+            // Calculate and copy SHA-256 hash (already null-terminated)
+            char* sha256 = calculateSHA256(filePath);
+            uint8_t fileHashBytes = (uint8_t)(strlen(sha256) + 1); // +1 for null terminator
+
+            if (sha256 != NULL) {
+                strncpy(fileInfos[currFileCount].fileHash, sha256, fileHashBytes);
+                fileInfos[currFileCount].fileHashBytes = fileHashBytes;
+                free(sha256);
+            } else {
+                fprintf(stderr, "Failed to calculate SHA256 for file: %s\n", entry->d_name);
+                continue;
+            }
+
+            currFileCount++;
+        }
+    }
+
+    *fileCount = currFileCount;
+    closedir(currentDir);
+    return fileInfos;
+}
+
+/* Function to handle DIFF command */
+void DIFF(listMessageResponse *serverFiles, int serverFileCount, listMessageResponse *clientFiles, uint8_t *clientFileCount) {
+    clientFiles = getFileNamesAndHashes(clientFileCount);
+
+    if (clientFiles == NULL || serverFiles == NULL) {
+        fatal_error("One of the file lists is NULL. Exiting...\n");
+    }
+
+    printf("Files on both machines:\n");
+    for (int i = 0; i < serverFileCount; i++) {
+        for (int j = 0; j < *clientFileCount; j++) {
+            if (strcmp(serverFiles[i].fileHash, clientFiles[j].fileHash) == 0) {
+                printf("File: %s\n", serverFiles[i].fileName);
+            }
+        }
+    }
+
+    printf("\nFiles missing on the client:\n");
+    for (int i = 0; i < serverFileCount; i++) {
+        int found = 0;
+        for (int j = 0; j < *clientFileCount; j++) {
+            if (strcmp(serverFiles[i].fileHash, clientFiles[j].fileHash) == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            printf("File: %s\n", serverFiles[i].fileName);
+        }
+    }
+
+    fflush(stdout);
+    return;
+}
