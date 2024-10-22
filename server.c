@@ -20,10 +20,27 @@
 #include <dirent.h> /**/
 #include <sys/stat.h>
 
+#include <dirent.h> /**/
+#include <sys/stat.h>
+
 #define RCVBUFSIZE 512		/* The receive buffer size */
 #define SNDBUFSIZE 512		/* The send buffer size */
 #define BUFSIZE 40		/* Your name can be as many as 40 chars*/
 #define DATA_DIR "server_files"
+
+#define FILE_READ_BUFSIZE 1024
+
+typedef struct {
+  char* fileName;
+  char* sha256Hash;
+} FileInfo;
+
+typedef struct {
+  uint8_t fileNameBytes;
+  char fileName[RCVBUFSIZE];
+  uint8_t fileHashBytes;
+  char fileHash[RCVBUFSIZE];
+} listMessageResponse;
 
 #define FILE_READ_BUFSIZE 1024
 
