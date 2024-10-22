@@ -15,8 +15,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include <glib.h>
 #include <openssl/evp.h>	    /* for OpenSSL EVP digest libraries/SHA256 */
+#include <openssl/sha.h>        /* for SHA256_DIGEST_LENGTH */
 
 /* Constants */
 #define RCVBUFSIZE 512		    /* The receive buffer size */
@@ -31,10 +31,23 @@ void fatal_error(char *message)
 }
 
 typedef struct {
-    int id;
-    char type;
-    char *content;
-} message;
+    uint8_t fileNameBytes;
+    char fileName[RCVBUFSIZE];
+    uint8_t fileHashBytes;
+    char fileHash[RCVBUFSIZE];
+} listMessageResponse;
+
+typedef struct {
+    uint8_t fileHashBytes;
+    char fileHash[RCVBUFSIZE];
+    uint8_t fileContentsBytes;
+    char fileContents[RCVBUFSIZE];
+} pullMessageResponse;
+
+typedef struct {
+    uint8_t fileHashBytes;
+    char *fileHash;
+} diff;
 
 /* The main function */
 int main(int argc, char *argv[])
@@ -46,20 +59,26 @@ int main(int argc, char *argv[])
 
     char *listedFiles;
 
-    char sndBuf[SNDBUFSIZE];	    /* Send Buffer */
-    char rcvBuf[RCVBUFSIZE];	    /* Receive Buffer */
-    
-    int i;			    /* Counter Value */
+    char *sndBuf;	    /* Send Buffer */
+    char *rcvBuf;	    /* Receive Buffer */
+
     int servPort = 10000;
     char *servIP = "127.0.0.1";
+
+    int serverFileCount;
+    int clientFileCount;
+
+    listMessageResponse *serverFiles;
+    diff *diffFiles;
     
-    
+    /*
     memset(&sndBuf, 0, RCVBUFSIZE);
     memset(&rcvBuf, 0, RCVBUFSIZE);
 
     msgLen = 0;
     strncpy(sndBuf, studentName, msgLen);
     sndBuf[msgLen] = '\0';
+    */
 
     /* Create a new TCP socket*/
     if ((clientSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
@@ -85,20 +104,95 @@ int main(int argc, char *argv[])
 
         switch (option) {
             case 1:
-                strcpy(sndBuf, "LIST");
-                msgLen = strlen(sndBuf);
+                /*---------- LIST ----------*/
+                // Send the integer 1 to the server
+                if (send(clientSock, &option, sizeof(option), 0) != sizeof(option))
+                    fatal_error("send() sent unexpected number of bytes");
+
+                // Receive first byte to determine number of files
+                int receivedBytes = recv(clientSock, &serverFileCount, sizeof(uint8_t), 0);
+
+                if (receivedBytes < 0)
+                    fatal_error("First recv() failed");
+                else if (receivedBytes == 0)
+                    fatal_error("Connection closed by server.\n");
+
+                int totalMessageSize = sizeof(uint8_t) + serverFileCount * (sizeof(listMessageResponse));
+
+                // Receive the raw data into the receive buffer
+                rcvBuf = (char *)malloc(totalMessageSize);
+
+                if (rcvBuf == NULL)
+                    fatal_error("malloc() failed for rcvBuf");
+
+                receivedBytes = recv(clientSock, rcvBuf, totalMessageSize, 0);
+
+                if (receivedBytes < 0)
+                    fatal_error("Second recv() failed");
+                else if (receivedBytes == 0)
+                    fatal_error("Connection closed by server.\n");
+                
+                // Allocate memory for the serverFiles array
+                serverFiles = malloc(serverFileCount * sizeof(listMessageResponse));
+
+                if (serverFiles == NULL)
+                    fatal_error("malloc() failed for serverFiles");
+
+                int offset = 0;
+                // Deserialize each listMessageResponse
+                for (int i = 0; i < serverFileCount; i++) {
+                    listMessageResponse *response = &serverFiles[i];
+
+                    // Initialize the listMessageResponse structure to zero
+                    memset(response, 0, sizeof(listMessageResponse));
+
+                    // Deserialize fileNameBytes
+                    memcpy(&response->fileNameBytes, rcvBuf + offset, sizeof(uint8_t));
+                    offset += sizeof(uint8_t);
+
+                    // Deserialize fileName
+                    memcpy(response->fileName, rcvBuf + offset, response->fileNameBytes);
+                    response->fileName[response->fileNameBytes] = '\0';
+                    offset += RCVBUFSIZE;
+
+                    // Deserialize fileHashBytes
+                    memcpy(&response->fileHashBytes, rcvBuf + offset, sizeof(uint8_t));
+                    offset += sizeof(uint8_t);
+
+                    // Deserialize fileHash
+                    memcpy(response->fileHash, rcvBuf + offset, response->fileHashBytes);
+                    response->fileHash[response->fileHashBytes] = '\0';
+                    offset += RCVBUFSIZE;
+                }
+
+                // Print the received messages for demonstration
+                for (int i = 0; i < serverFileCount; i++) {
+                    printf("File %d:\n", i + 1);
+                    printf("Name: %s\n", serverFiles[i].fileName);
+                    printf("Hash: %s\n", serverFiles[i].fileHash);
+                }
                 break;
+
             case 2:
-                strcpy(sndBuf, "DIFF");
-                msgLen = strlen(sndBuf);
+                /*---------- DIFF ----------*/
                 break;
             case 3:
-                strcpy(sndBuf, "PULL");
-                msgLen = strlen(sndBuf);
+                /*---------- PULL ----------*/
+                // Send the integer 1 to the server
+                if (send(clientSock, &option, sizeof(option), 0) != sizeof(option))
+                    fatal_error("send() sent unexpected number of bytes");
                 break;
             case 4:
-                strcpy(sndBuf, "LEAVE");
-                msgLen = strlen(sndBuf);
+                /*---------- LEAVE ----------*/
+                close(clientSock);
+                // Free the allocated memory for each fileName and fileHash
+                if (serverFileCount > 0 && serverFiles != NULL) {
+                    for (int i = 0; i < serverFileCount; i++) {
+                        free(serverFiles[i].fileName);
+                        free(serverFiles[i].fileHash);
+                    }
+                    free(serverFiles);
+                }
                 break;
             default:
                 printf("Invalid option. Please try again.\n");
