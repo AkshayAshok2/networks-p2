@@ -32,6 +32,13 @@ typedef struct {
   char* sha256Hash;
 } FileInfo;
 
+typedef struct {
+  uint8_t fileNameBytes;
+  char fileName[RCVBUFSIZE];
+  uint8_t fileHashBytes;
+  char fileHash[RCVBUFSIZE];
+} listMessageResponse;
+
 void fatal_error(char *message)
 {
     perror(message);
@@ -182,15 +189,15 @@ char* calculateSHA256(const char* filePath){
 }
 
 //Function to get file names
-FileInfo* getFileNames(const char* dirPath, int* fileCount) {
+listMessageResponse* getFileNames(const char* dirPath) {
   DIR *currentDir;
   struct dirent *entry;
-  *fileCount = 0;
+  int fileCount = 0;
   char filePath[1024];
   int capacity = 10; //initial capacity for storing file info
 
   // Allocate memory for storing file info
-  FileInfo* fileInfos = malloc(capacity * sizeof(FileInfo));
+  listMessageResponse* fileInfos = malloc(capacity * sizeof(listMessageResponse));
   if(fileInfos == NULL){
     perror("malloc");
     return NULL;
@@ -202,22 +209,23 @@ FileInfo* getFileNames(const char* dirPath, int* fileCount) {
     return NULL;
   }
 
+  int offset = 0;
   // Loop through each entry in the directory
   while ((entry = readdir(currentDir)) != NULL){
+
     snprintf(filePath, sizeof(filePath), "%s%s", dirPath, entry->d_name);
     struct stat fileStat;
-    if(stat(filePath, &fileStat) == 0 && S_ISREG(fileStat.st_mode)){
-      
+    if (stat(filePath, &fileStat) == 0 && S_ISREG(fileStat.st_mode)){
       //double size if capacity is reached
-      if(*fileCount >= capacity){
+      if (fileCount >= capacity){
         capacity *= 2;
-        FileInfo* temp = realloc(fileInfos, capacity * sizeof(FileInfo));
+        listMessageResponse* temp = realloc(fileInfos, capacity * sizeof(listMessageResponse));
         if(temp == NULL){
           perror("realloc");
           closedir(currentDir);
-          for(int i = 0; i < *fileCount; i++){
+          for(int i = 0; i < fileCount; i++){
             free(fileInfos[i].fileName);
-            free(fileInfos[i].sha256Hash);
+            free(fileInfos[i].fileHash);
           }
           free(fileInfos);
           return NULL;
@@ -225,14 +233,25 @@ FileInfo* getFileNames(const char* dirPath, int* fileCount) {
         fileInfos = temp;
       }
 
-      // Store file name and its SHA-256 hash
-      fileInfos[*fileCount].fileName = strdup(entry->d_name);
-      fileInfos[*fileCount].sha256Hash = calculateSHA256(filePath); // Store file name and its SHA-256 hash
-      if(fileInfos[*fileCount].sha256Hash == NULL){
+      uint8_t fileNameBytes = sizeof(entry->d_name);
+      char* sha256 = calculateSHA256(filePath);
+      uint8_t fileHashBytes = strlen(sha256);
+
+      memcpy(&fileNameBytes, fileInfos + offset, sizeof(uint8_t));
+      offset += sizeof(uint8_t);
+      memcpy(&entry->d_name, fileInfos + offset, fileNameBytes);
+      offset += RCVBUFSIZE - fileNameBytes;
+      memcpy(&fileHashBytes, fileInfos + offset, sizeof(uint8_t));
+      offset += sizeof(uint8_t);
+      memcpy(sha256, fileInfos + offset, fileHashBytes);
+      offset += RCVBUFSIZE - fileHashBytes;
+
+      //fileInfos[fileCount].fileHash = calculateSHA256(filePath); // Store file name and its SHA-256 hash
+      if(fileInfos[fileCount].fileHash == NULL){
         printf("Failed to calculate SHA256 for file: %s\n", entry->d_name);
       }
 
-      (*fileCount)++;
+      fileCount++;
     }
   }
 
