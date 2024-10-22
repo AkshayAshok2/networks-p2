@@ -17,10 +17,20 @@
 #include <string.h>	  /* support any string ops */
 #include <openssl/evp.h>  /* for OpenSSL EVP digest libraries/SHA256 */
 
+#include <dirent.h> /**/
+#include <sys/stat.h>
+
 #define RCVBUFSIZE 512		/* The receive buffer size */
 #define SNDBUFSIZE 512		/* The send buffer size */
 #define BUFSIZE 40		/* Your name can be as many as 40 chars*/
 #define DATA_DIR "server_files"
+
+#define FILE_READ_BUFSIZE 1024
+
+typedef struct {
+  char* fileName;
+  char* sha256Hash;
+} FileInfo;
 
 void fatal_error(char *message)
 {
@@ -99,4 +109,141 @@ int main(int argc, char *argv[])
   close(serverSock);
   return 0;
 }
+
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+
+//Function for calculating SHA-256 hash
+char* calculateSHA256(const char* filePath){
+  
+  //open file in binary mode
+  FILE* file = fopen(filePath, "rb");
+  if(!file){
+    perror("fopen");
+    return NULL;
+  }
+
+  //Initialize EVP context for SHA256
+  EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+  if(mdctx == NULL){
+    perror("EVP_MD_CTX_new");
+    fclose(file);
+    return NULL;
+  }
+
+  //Initialize SHA256 algorithm
+  if(EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1){
+    perror("EVP_DigestInit_ex");
+    EVP_MD_CTX_free(mdctx);
+    fclose(file);
+    return NULL;
+  }
+
+  //Read the file in chunks and update the hash calculation
+  unsigned char buffer[FILE_READ_BUFSIZE];
+  size_t bytesRead;
+  while((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0){
+    if(EVP_DigestUpdate(mdctx, buffer, bytesRead) != 1){
+      perror("EVP_DigestUpdate");
+      EVP_MD_CTX_free(mdctx);
+      fclose(file);
+      return NULL;
+    }
+  }
+
+  //Finalize Hash Calculation
+  unsigned char hash[EVP_MAX_MD_SIZE];
+  unsigned int hashLength;
+  if(EVP_DigestFinal_ex(mdctx, hash, &hashLength) != 1){
+    perror("EVP_DigestFinal_ex");
+    EVP_MD_CTX_free(mdctx);
+    fclose(file);
+    return NULL;
+  }
+
+  //Convert hash to hexadecimal
+  char* hashString = malloc(hashLength * 2 + 1);
+  if(hashString == NULL){
+    perror("malloc");
+    EVP_MD_CTX_free(mdctx);
+    fclose(file);
+    return NULL;
+  }
+  for(unsigned int i = 0; i < hashLength; i++){
+    sprintf(hashString + (i * 2), "%02x", hash[i]);
+  }
+  hashString[hashLength * 2] = '\0';
+
+  EVP_MD_CTX_free(mdctx);
+  fclose(file);
+
+  return hashString;
+
+
+}
+
+//Function to get file names
+FileInfo* getFileNames(const char* dirPath, int* fileCount) {
+  DIR *currentDir;
+  struct dirent *entry;
+  *fileCount = 0;
+  char filePath[1024];
+  int capacity = 10; //initial capacity for storing file info
+
+  // Allocate memory for storing file info
+  FileInfo* fileInfos = malloc(capacity * sizeof(FileInfo));
+  if(fileInfos == NULL){
+    perror("malloc");
+    return NULL;
+  }
+
+  if((currentDir = opendir(dirPath)) == NULL){
+    perror("opendir() error");
+    free(fileInfos);
+    return NULL;
+  }
+
+  // Loop through each entry in the directory
+  while ((entry = readdir(currentDir)) != NULL){
+    snprintf(filePath, sizeof(filePath), "%s%s", dirPath, entry->d_name);
+    struct stat fileStat;
+    if(stat(filePath, &fileStat) == 0 && S_ISREG(fileStat.st_mode)){
+      
+      //double size if capacity is reached
+      if(*fileCount >= capacity){
+        capacity *= 2;
+        FileInfo* temp = realloc(fileInfos, capacity * sizeof(FileInfo));
+        if(temp == NULL){
+          perror("realloc");
+          closedir(currentDir);
+          for(int i = 0; i < *fileCount; i++){
+            free(fileInfos[i].fileName);
+            free(fileInfos[i].sha256Hash);
+          }
+          free(fileInfos);
+          return NULL;
+        }
+        fileInfos = temp;
+      }
+
+      // Store file name and its SHA-256 hash
+      fileInfos[*fileCount].fileName = strdup(entry->d_name);
+      fileInfos[*fileCount].sha256Hash = calculateSHA256(filePath); // Store file name and its SHA-256 hash
+      if(fileInfos[*fileCount].sha256Hash == NULL){
+        printf("Failed to calculate SHA256 for file: %s\n", entry->d_name);
+      }
+
+      (*fileCount)++;
+    }
+  }
+
+  closedir(currentDir);
+  return fileInfos; //return array of FileInfo
+
+}
+
+/*int list(){
+  printf("Sending Current List of Files to Client\n");
+
+
+}*/
 
