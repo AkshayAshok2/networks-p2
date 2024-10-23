@@ -21,7 +21,6 @@
 
 /* Constants */
 #define RCVBUFSIZE 512		    /* The receive buffer size */
-#define SNDBUFSIZE 512		    /* The send buffer size */
 #define MDLEN 32
 #define DATA_DIR "./client_files"
 #define FILE_READ_BUFSIZE 1024
@@ -32,26 +31,37 @@ typedef struct {
     char fileName[RCVBUFSIZE];
     uint8_t fileHashBytes;
     char fileHash[RCVBUFSIZE];
-} listMessageResponse;
+} ListMessageResponse;
 
 typedef struct {
     uint8_t fileHashBytes;
     char fileHash[RCVBUFSIZE];
-    uint8_t fileContentsBytes;
+    uint32_t fileContentsBytes;
     char fileContents[RCVBUFSIZE];
-} pullMessageResponse;
+} PullMessageResponse;
 
 typedef struct {
+    uint8_t fileNameBytes;
+    char fileName[RCVBUFSIZE];
     uint8_t fileHashBytes;
-    char *fileHash;
-} diff;
+    char fileHash[RCVBUFSIZE];
+} DiffMessage;
 
 /* Function prototypes */
 void fatal_error(char *message);
-listMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf);
+ListMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf);
 char* calculateSHA256(const char* filePath);
-listMessageResponse* getFileNamesAndHashes(uint8_t *fileCount);
-void DIFF(listMessageResponse *serverFiles, int serverFileCount, listMessageResponse *clientFiles, uint8_t *clientFileCount);
+ListMessageResponse* getFileNamesAndHashes(uint8_t *fileCount);
+DiffMessage *DIFF(
+    ListMessageResponse *serverFiles, 
+    uint8_t serverFileCount, 
+    ListMessageResponse *clientFiles, 
+    uint8_t *clientFileCount, 
+    uint8_t *diffFileCount, 
+    uint8_t suppressOutput
+);
+void receive_file_with_hash(int sock, const char *file_name);
+void PULL(int clientSock, uint8_t *diffFileCount, DiffMessage *diffFiles, char *rcvBuf);
 
 /* The main function */
 int main(int argc, char *argv[])
@@ -68,10 +78,11 @@ int main(int argc, char *argv[])
 
     uint8_t serverFileCount;
     uint8_t clientFileCount;
+    uint8_t diffFileCount;
 
-    listMessageResponse *serverFiles;
-    listMessageResponse *clientFiles;
-    diff *diffFiles;
+    ListMessageResponse *serverFiles;
+    ListMessageResponse *clientFiles;
+    DiffMessage *diffFiles;
 
     /* Create a new TCP socket*/
     if ((clientSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
@@ -112,7 +123,7 @@ int main(int argc, char *argv[])
                     break;
                 }
 
-                // Print the received messages for demonstration
+                // Print the received files
                 for (int i = 0; i < serverFileCount; i++) {
                     printf("File %d:\n", i + 1);
                     printf("Name: %s\n", serverFiles[i].fileName);
@@ -143,13 +154,62 @@ int main(int argc, char *argv[])
                     clientFiles = NULL;
                 }
 
-                DIFF(serverFiles, serverFileCount, clientFiles, &clientFileCount);
+                diffFiles = DIFF(
+                    serverFiles, 
+                    serverFileCount, 
+                    clientFiles, 
+                    &clientFileCount,
+                    &diffFileCount,
+                    0
+                );
                 break;
             case 3:
                 /*---------- PULL ----------*/
-                // Send 3 to the server
-                if (send(clientSock, &option, sizeof(option), 0) != sizeof(option))
-                    fatal_error("send() sent unexpected number of bytes");
+                if (serverFileCount == 0 || serverFiles == NULL) {
+                    printf("LIST has not been called yet. Doing so now...\n");
+
+                    if (serverFiles != NULL) {
+                        free(serverFiles);
+                        serverFiles = NULL;
+                    }
+
+                    serverFiles = LIST(clientSock, &serverFileCount, rcvBuf);
+
+                    if (serverFiles == NULL || serverFileCount == 0) {
+                        printf("LIST failed. Exiting...\n");
+                        break;
+                    }
+                }
+
+                if (clientFileCount == 0 || clientFiles == NULL || diffFiles == NULL) {
+                    printf("DIFF has not been called yet. Doing so now...\n");
+
+                    if (clientFiles != NULL) {
+                        free(clientFiles);
+                        clientFiles = NULL;
+                    }
+
+                    if (diffFiles != NULL) {
+                        free(diffFiles);
+                        diffFiles = NULL;
+                    }
+
+                    diffFiles = DIFF(
+                        serverFiles, 
+                        serverFileCount, 
+                        clientFiles, 
+                        &clientFileCount,
+                        &diffFileCount, 
+                        1
+                    );
+
+                    if (clientFiles == NULL || clientFileCount == 0) {
+                        printf("Failed to load client files. Exiting...\n");
+                        break;
+                    }
+                }
+
+                PULL(clientSock, diffFileCount, diffFiles, rcvBuf);
                 break;
             case 4:
                 /*---------- LEAVE ----------*/
@@ -164,6 +224,10 @@ int main(int argc, char *argv[])
 
                 if (clientFiles != NULL) {
                     free(clientFiles);
+                }
+
+                if (diffFiles != NULL) {
+                    free(diffFiles);
                 }
 
                 close(clientSock);
@@ -185,7 +249,7 @@ void fatal_error(char *message)
 }
 
 /* Function to handle LIST command */
-listMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf) {
+ListMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf) {
     // Clean up if previously run
     if (rcvBuf != NULL) {
         free(rcvBuf);
@@ -204,7 +268,7 @@ listMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf
     else if (bytesReceived == 0)
         fatal_error("Connection closed by server for first byte.\n");
 
-    uint32_t totalMessageSize = *serverFileCount * sizeof(listMessageResponse);
+    uint32_t totalMessageSize = *serverFileCount * sizeof(ListMessageResponse);
 
     if (rcvBuf != NULL)
         free(rcvBuf);
@@ -229,7 +293,7 @@ listMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf
         totalBytesReceived += bytesReceived;
     }
     
-    listMessageResponse *serverFiles = (listMessageResponse *)malloc(totalMessageSize);
+    ListMessageResponse *serverFiles = (ListMessageResponse *)malloc(totalMessageSize);
 
     if (serverFiles == NULL)
         fatal_error("malloc() failed for serverFiles");
@@ -238,9 +302,9 @@ listMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf
 
     // Deserialize each listMessageResponse
     for (int i = 0; i < *serverFileCount; i++) {
-        listMessageResponse *response = &serverFiles[i];
+        ListMessageResponse *response = &serverFiles[i];
 
-        memset(response, 0, sizeof(listMessageResponse));
+        memset(response, 0, sizeof(ListMessageResponse));
 
         // Deserialize fileNameBytes
         memcpy(&response->fileNameBytes, rcvBuf + offset, sizeof(uint8_t));
@@ -334,21 +398,21 @@ char* calculateSHA256(const char* filePath){
 }
 
 /* Returns populated list of `listMessagResponse` structs */
-listMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
+ListMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
     DIR *currentDir;
     struct dirent *entry;
     char filePath[1024];
     int capacity = 10; // Initial capacity for storing file info
     uint8_t currFileCount = 0;
 
-    listMessageResponse* fileInfos = malloc(capacity * sizeof(listMessageResponse));
+    ListMessageResponse* fileInfos = malloc(capacity * sizeof(ListMessageResponse));
 
     if (fileInfos == NULL) {
         perror("malloc");
         return NULL;
     }
 
-    memset(fileInfos, 0, capacity * sizeof(listMessageResponse));
+    memset(fileInfos, 0, capacity * sizeof(ListMessageResponse));
 
     if ((currentDir = opendir(DATA_DIR)) == NULL) {
         perror("opendir() error");
@@ -365,8 +429,8 @@ listMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
             // Double size if capacity is reached
             if (*fileCount >= capacity) {
                 int newCapacity = capacity * 2;
-                listMessageResponse* temp = realloc(fileInfos, newCapacity * sizeof(listMessageResponse));
-                memset(temp + capacity, 0, capacity * sizeof(listMessageResponse));
+                ListMessageResponse* temp = realloc(fileInfos, newCapacity * sizeof(ListMessageResponse));
+                memset(temp + capacity, 0, capacity * sizeof(ListMessageResponse));
 
                 if (temp == NULL) {
                     perror("realloc");
@@ -407,36 +471,234 @@ listMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
 }
 
 /* Function to handle DIFF command */
-void DIFF(listMessageResponse *serverFiles, int serverFileCount, listMessageResponse *clientFiles, uint8_t *clientFileCount) {
+DiffMessage *DIFF(
+    ListMessageResponse *serverFiles, 
+    uint8_t serverFileCount, 
+    ListMessageResponse *clientFiles, 
+    uint8_t *clientFileCount,
+    uint8_t *diffFileCount, 
+    uint8_t suppressOutput
+) {
     clientFiles = getFileNamesAndHashes(clientFileCount);
+    int overlapCount = 0;
+    DiffMessage *diffFiles = NULL;
 
     if (clientFiles == NULL || serverFiles == NULL) {
         fatal_error("One of the file lists is NULL. Exiting...\n");
     }
 
-    printf("Files on both machines:\n");
-    for (int i = 0; i < serverFileCount; i++) {
-        for (int j = 0; j < *clientFileCount; j++) {
-            if (strcmp(serverFiles[i].fileHash, clientFiles[j].fileHash) == 0) {
-                printf("File: %s\n", serverFiles[i].fileName);
+    if (!suppressOutput) {
+        printf("Files on both machines:\n");
+        for (int i = 0; i < serverFileCount; i++) {
+            for (int j = 0; j < *clientFileCount; j++) {
+                if (strcmp(serverFiles[i].fileHash, clientFiles[j].fileHash) == 0) {
+                    printf("File: %s\n", serverFiles[i].fileName);
+                    overlapCount++;
+                }
             }
         }
     }
 
-    printf("\nFiles missing on the client:\n");
-    for (int i = 0; i < serverFileCount; i++) {
-        int found = 0;
-        for (int j = 0; j < *clientFileCount; j++) {
-            if (strcmp(serverFiles[i].fileHash, clientFiles[j].fileHash) == 0) {
-                found = 1;
-                break;
+    *diffFileCount = serverFileCount - overlapCount;
+
+    if (serverFileCount > overlapCount) {
+        int diffTotal = serverFileCount - overlapCount;
+
+        if (!suppressOutput)
+            printf("\nFiles missing on the client:\n");
+        diffFiles = malloc(diffTotal * sizeof(DiffMessage));
+        memset(diffFiles, 0, diffTotal * sizeof(DiffMessage));
+        int diffCount = 0;
+
+        for (int i = 0; i < serverFileCount; i++) {
+            int found = 0;
+            for (int j = 0; j < *clientFileCount; j++) {
+                if (strcmp(serverFiles[i].fileHash, clientFiles[j].fileHash) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                if (!suppressOutput)
+                    printf("File: %s\n", serverFiles[i].fileName);
+
+                strncpy(diffFiles[diffCount].fileName, serverFiles[i].fileName, serverFiles[i].fileNameBytes);
+                diffFiles[diffCount].fileNameBytes = serverFiles[i].fileNameBytes;
+                strncpy(diffFiles[diffCount].fileHash, serverFiles[i].fileHash, serverFiles[i].fileHashBytes);
+                diffFiles[diffCount].fileHashBytes = serverFiles[i].fileHashBytes;
+
+                diffCount++;
             }
         }
-        if (!found) {
-            printf("File: %s\n", serverFiles[i].fileName);
-        }
     }
-
+    
     fflush(stdout);
-    return;
+
+    if (serverFileCount > overlapCount) {
+        return diffFiles;
+    } else {
+        return NULL;
+    }
+}
+
+//receive a file and its hash from the server
+void receive_file_with_hash(int sock, const char *file_name){
+    char buffer[FILE_READ_BUFSIZE];
+    ssize_t bytes_received;
+    size_t file_size;
+    size_t total_bytes_received = 0;
+
+    recv(sock, &file_size, sizeof(file_size), 0);
+    printf("Receiving file: %s (%zu bytes)\n", file_name, file_size);
+
+    FILE *fp = fopen(file_name, "wb");
+    if(fp == NULL){
+        perror("Error opening file for writing");
+        return;
+    }
+
+    // Receive the file data
+    while((bytes_received = recv(sock, buffer, FILE_READ_BUFSIZE, 0)) > 0){
+        fwrite(buffer, sizeof(char), bytes_received, fp);
+        total_bytes_received += bytes_received;
+        if(total_bytes_received >= file_size){
+            break;
+        }
+    }
+    fclose(fp);
+    printf("File %s received succesfully\n", file_name);
+}
+
+
+/* Function to handle PULL command */
+void PULL(int clientSock, uint8_t *diffFileCount, DiffMessage *diffFiles, char *rcvBuf) {
+    uint8_t option = 3;
+
+    // Send 3 to the server
+    if (send(clientSock, &option, sizeof(option), 0) != sizeof(option))
+        fatal_error("send() for option sent unexpected number of bytes");
+
+    int totalSize = sizeof(uint8_t) + *diffFileCount * sizeof(DiffMessage);
+    char *buffer = (char *)malloc(totalSize);
+
+    if (buffer == NULL) {
+        fatal_error("malloc() failed for buffer");
+    }
+
+    memset(buffer, 0, totalSize);
+
+    // Serialize the data
+    int offset = 0;
+    memcpy(buffer, diffFileCount, sizeof(uint8_t));
+    offset += sizeof(uint8_t);
+
+    for (int i = 0; i < *diffFileCount; i++) {
+        memcpy(buffer + offset, &diffFiles[i], sizeof(DiffMessage));
+        offset += sizeof(DiffMessage);
+    }
+
+    // Send the number of files to be pulled
+    if (send(clientSock, diffFileCount, sizeof(uint8_t), 0) != sizeof(uint8_t))
+        fatal_error("send() for diffFileCount sent unexpected number of bytes");
+
+    // Send the data
+    int totalBytesSent = 0;
+    int bytesSent;
+
+    while (totalBytesSent < totalSize) {
+        bytesSent = send(clientSock, buffer + totalBytesSent, totalSize - totalBytesSent, 0);
+
+        if (bytesSent < 0)
+            fatal_error("send() failed");
+        else if (bytesSent == 0)
+            fatal_error("Connection closed somehow?\n");
+
+        totalBytesSent += bytesSent;
+    }
+
+    free(buffer);
+    uint8_t serverDiffFileCount;
+
+    // Receive the number of files to be received from server
+    if (recv(clientSock, &serverDiffFileCount, sizeof(uint8_t), 0) != sizeof(uint8_t)
+    || serverDiffFileCount != *diffFileCount)
+        fatal_error("recv() for diffFileCount received unexpected number of bytes or wrong value");
+
+    // Receive all files
+    for (int i = 0; i < serverDiffFileCount; i++) {
+        int totalBytesReceived;
+        int bytesReceived;
+        uint8_t fileNameBytes;
+        char *fileName;
+        uint32_t fileContentsBytes;
+        char *fileContents;
+
+        // Receive fileNameBytes
+        if (recv(clientSock, &fileNameBytes, sizeof(uint8_t), 0) != sizeof(uint8_t))
+            fatal_error("recv() for fileNameBytes failed");
+
+        // Receive fileName
+        fileName = (char *)malloc(fileNameBytes);
+        memset(fileName, 0, fileNameBytes);
+        totalBytesReceived = 0;
+
+        while (totalBytesReceived < fileNameBytes) {
+            bytesReceived = recv(clientSock, fileName + totalBytesReceived, fileNameBytes - totalBytesReceived, 0);
+
+            if (bytesReceived < 0)
+                fatal_error("recv() for file names and hashes failed");
+            else if (bytesReceived == 0)
+                printf("??? stopping here.\n");
+                break;
+
+            totalBytesReceived += bytesReceived;
+        }
+
+        // Receive fileContentsBytes
+        totalBytesReceived = 0;
+
+        while (totalBytesReceived < sizeof(uint32_t)) {
+            bytesReceived = recv(clientSock, &fileContentsBytes + totalBytesReceived, sizeof(uint32_t) - totalBytesReceived, 0);
+
+            if (bytesReceived < 0)
+                fatal_error("recv() for fileContentsBytes failed");
+            else if (bytesReceived == 0)
+                printf("??? stopping here.\n");
+                break;
+
+            totalBytesReceived += bytesReceived;
+        }
+
+        // Receive fileContents
+        fileContents = (char *)malloc(fileContentsBytes);
+        memset(fileContents, 0, fileContentsBytes);
+        totalBytesReceived = 0;
+
+        while (totalBytesReceived < fileContentsBytes) {
+            bytesReceived = recv(clientSock, fileContents + totalBytesReceived, fileContentsBytes - totalBytesReceived, 0);
+
+            if (bytesReceived < 0)
+                fatal_error("recv() for fileContents failed");
+            else if (bytesReceived == 0)
+                printf("??? stopping here.\n");
+                break;
+
+            totalBytesReceived += bytesReceived;
+        }
+
+        // Write to file
+        FILE *fp = fopen(fileName, "wb");
+
+        if (fp == NULL)
+            fatal_error("Error opening file for writing");
+
+        if (fwrite(fileContents, 1, fileContentsBytes, fp) != fileContentsBytes)
+            fatal_error("fwrite() failed to write whole file");
+
+        fclose(fp);
+        free(fileName);
+        free(fileContents);
+    }
+
+    return NULL;
 }
