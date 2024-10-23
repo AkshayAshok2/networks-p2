@@ -8,23 +8,24 @@
 *////////////////////////////////////////////////////////////
 
 /* Included libraries */
-#include <stdio.h>		    /* for printf() and fprintf() */
-#include <sys/socket.h>		    /* for socket(), connect(), send(), and recv() */
-#include <arpa/inet.h>		    /* for sockaddr_in and inet_addr() */
+#include <stdio.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <openssl/evp.h>	    /* for OpenSSL EVP digest libraries/SHA256 */
+#include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <fcntl.h>
 
 /* Constants */
-#define RCVBUFSIZE 512		    /* The receive buffer size */
+#define RCVBUFSIZE 512
 #define MDLEN 32
 #define DATA_DIR "./client_files"
 #define FILE_READ_BUFSIZE 1024
+#define SERVER_PORT 59000
 
 /* Struct definitions */
 typedef struct {
@@ -73,8 +74,6 @@ int main(int argc, char *argv[])
     struct sockaddr_in client_addr; /* The client address */
 
     char *rcvBuf;	    /* Receive Buffer */
-
-    int servPort = 60000;
     char *servIP = "127.0.0.1";
 
     uint8_t serverFileCount;
@@ -93,7 +92,7 @@ int main(int argc, char *argv[])
     /* Construct the server address structure */
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family        = AF_INET;
-    serv_addr.sin_port          = htons(servPort);
+    serv_addr.sin_port          = htons(SERVER_PORT);
     serv_addr.sin_addr.s_addr   = inet_addr(servIP);
 
     /* Establish connection to the server */
@@ -104,7 +103,7 @@ int main(int argc, char *argv[])
     
     while (1) {
         printf("\nSelect an option:\n1. LIST\n2. DIFF\n3. PULL\n4. LEAVE\n");
-        uint8_t option;
+        uint8_t option = 0;
         scanf("%hhu", &option);
 
         if (option == 1) {
@@ -171,20 +170,20 @@ int main(int argc, char *argv[])
                 fatal_error("send() sent unexpected number of bytes");
 
             // Free the allocated memory for each fileName and fileHash
-            if (serverFiles != NULL) {
-                free(serverFiles);
-                serverFiles = NULL;
-            }
+            // if (serverFiles != NULL) {
+            //     free(serverFiles);
+            //     serverFiles = NULL;
+            // }
 
-            if (clientFiles != NULL) {
-                free(clientFiles);
-                clientFiles = NULL;
-            }
+            // if (clientFiles != NULL) {
+            //     free(clientFiles);
+            //     clientFiles = NULL;
+            // }
 
-            if (diffFiles != NULL) {
-                free(diffFiles);
-                diffFiles = NULL;
-            }
+            // if (diffFiles != NULL) {
+            //     free(diffFiles);
+            //     diffFiles = NULL;
+            // }
 
             close(clientSock);
             return 0;
@@ -250,18 +249,17 @@ ListMessageResponse *LIST(int clientSock, uint8_t *serverFileCount, char *rcvBuf
         totalBytesReceived += bytesReceived;
     }
     
-    ListMessageResponse *serverFiles = (ListMessageResponse *)malloc(totalMessageSize);
+    ListMessageResponse *serverFiles = (ListMessageResponse *)malloc(*serverFileCount * sizeof(ListMessageResponse));
 
     if (serverFiles == NULL)
         fatal_error("malloc() failed for serverFiles");
 
+    memset(serverFiles, 0, *serverFileCount * sizeof(ListMessageResponse));
     int offset = 0;
 
     // Deserialize each listMessageResponse
     for (int i = 0; i < *serverFileCount; i++) {
         ListMessageResponse *response = &serverFiles[i];
-
-        memset(response, 0, sizeof(ListMessageResponse));
 
         // Deserialize fileNameBytes
         memcpy(&response->fileNameBytes, rcvBuf + offset, sizeof(uint8_t));
@@ -343,6 +341,8 @@ char* calculateSHA256(const char* filePath){
         fatal_error("malloc() failed for hashString");
     }
 
+    memset(hashString, 0, hashLength * 2 + 1);
+
     for (unsigned int i = 0; i < hashLength; i++) {
         sprintf(hashString + (i * 2), "%02x", hash[i]);
     }
@@ -372,7 +372,6 @@ ListMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
 
     memset(fileInfos, 0, capacity * sizeof(ListMessageResponse));
     
-    printf("data dir: %s\n", DATA_DIR);
     // HERE!
     if ((currentDir = opendir(DATA_DIR)) == NULL) { // this line
         printf("Do we enter here?\n"); // no
@@ -492,9 +491,17 @@ DiffMessage *DIFF(
                 if (!suppressOutput)
                     printf("File: %s\n", serverFiles[i].fileName);
 
+                // printf("Length of file name: %ld\n", strlen(serverFiles[i].fileName));
+                // printf("File name bytes: %d\n", serverFiles[i].fileNameBytes);
+                // printf("Length of file hash: %ld\n", strlen(serverFiles[i].fileHash));
+                // printf("File hash bytes: %d\n", serverFiles[i].fileHashBytes);
+
                 strncpy(diffFiles[diffCount].fileName, serverFiles[i].fileName, RCVBUFSIZE);
+                diffFiles[diffCount].fileName[serverFiles[i].fileNameBytes] = '\0';
                 diffFiles[diffCount].fileNameBytes = serverFiles[i].fileNameBytes;
+
                 strncpy(diffFiles[diffCount].fileHash, serverFiles[i].fileHash, RCVBUFSIZE);
+                diffFiles[diffCount].fileHash[serverFiles[i].fileHashBytes] = '\0';
                 diffFiles[diffCount].fileHashBytes = serverFiles[i].fileHashBytes;
 
                 diffCount++;
@@ -638,7 +645,7 @@ void PULL(int clientSock, uint8_t *diffFileCount, DiffMessage *diffFiles, char *
 
         if (fileContents == NULL)
             fatal_error("malloc() failed for fileContents");
-            
+
         memset(fileContents, 0, fileContentsBytes);
         totalBytesReceived = 0;
 

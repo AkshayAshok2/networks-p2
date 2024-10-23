@@ -8,16 +8,16 @@
 *////////////////////////////////////////////////////////////
 
 /* Included libraries */
-#include <stdio.h>	  /* for printf() and fprintf() */
-#include <sys/socket.h>	  /* for socket(), connect(), send(), and recv() */
-#include <arpa/inet.h>	  /* for sockaddr_in and inet_addr() */
-#include <stdlib.h>	  /* supports all sorts of functionality */
-#include <unistd.h>	  /* for close() */
-#include <string.h>	  /* support any string ops */
-#include <openssl/evp.h>  /* for OpenSSL EVP digest libraries/SHA256 */
-#include <openssl/sha.h>
+#include <stdio.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <openssl/evp.h>
+#include <openssl/sha.h>
 #include <fcntl.h>
 #include <pthread.h>
 
@@ -26,7 +26,9 @@
 #define BUFSIZE 40		/* Your name can be as many as 40 chars*/
 #define DATA_DIR "./server_files"
 #define FILE_READ_BUFSIZE 1024
+#define SERVER_PORT 59000
 
+/* Struct definitions */
 typedef struct {
   uint8_t fileNameBytes;
   char fileName[RCVBUFSIZE];
@@ -48,25 +50,21 @@ typedef struct {
   char fileHash[RCVBUFSIZE];
 } DiffMessage;
 
-void fatal_error(char *message)
-{
-  perror(message);
-  exit(1);
-}
+/* Function prototypes */
+
 
 ListMessageResponse* getFileNamesAndHashes(uint8_t* fileCount);
 void sendSingleFile(int clientSock, const char *fileName, uint8_t fileNameBytes);
+char * calculateSHA256(const char * filePath);
 
 /* The main function */
 int main(int argc, char *argv[])
 {
       uint8_t fileCount;
-      int serverSock;				    // Server Socket 
-      int clientSock;				// Client Socket 
-      struct sockaddr_in serv_addr;	// Local address 
+      int serverSock;
+      int clientSock;
+      struct sockaddr_in serv_addr;
       struct sockaddr_in client_addr;		// Client address 
-      unsigned short clientPort;    // Client port 
-      unsigned short servPort;		// Server port 
       unsigned int clntLen;
 
       char *rcvBuf;			// Buff to store requested files from client
@@ -76,8 +74,6 @@ int main(int argc, char *argv[])
 
       ListMessageResponse *serverFiles;
 
-      servPort = 60000;
-
       // Create new TCP Socket for incoming requests
       if ((serverSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
         fatal_error("socket() failed");
@@ -86,7 +82,7 @@ int main(int argc, char *argv[])
       memset(&serv_addr, 0, sizeof(serv_addr));
       serv_addr.sin_family       = AF_INET;
       serv_addr.sin_addr.s_addr  = htonl(INADDR_ANY);
-      serv_addr.sin_port         = htons(servPort);
+      serv_addr.sin_port         = htons(SERVER_PORT);
       
       // Bind to local address structure 
       if (bind(serverSock, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
@@ -271,45 +267,47 @@ int main(int argc, char *argv[])
       return 0;
 }
 
+void fatal_error(char *message)
+{
+  perror(message);
+  exit(1);
+}
+
 // Returns null-terminated SHA-256 hash
 char* calculateSHA256(const char* filePath){
-      //open file in binary mode
       FILE* file = fopen(filePath, "rb");
 
       if (!file) {
-        perror("fopen");
-        return NULL;
+        fatal_error("fopen() failed");
       }
 
       // Initialize EVP context for SHA256
       EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
-      if(mdctx == NULL){
-        perror("EVP_MD_CTX_new");
+
+      if (mdctx == NULL) {
         fclose(file);
-        return NULL;
+        fatal_error("EVP_MD_CTX_new() failed");
       }
 
-      //Initialize SHA256 algorithm
-      if(EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1){
-        perror("EVP_DigestInit_ex");
+      // Initialize SHA256 algorithm
+      if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1) {
         EVP_MD_CTX_free(mdctx);
         fclose(file);
-        return NULL;
+        fatal_error("EVP_DigestInit_ex() failed");
       }
 
-      //Read the file in chunks and update the hash calculation
+      // Read the file in chunks and update the hash calculation
       unsigned char buffer[FILE_READ_BUFSIZE];
       size_t bytesRead;
-      while((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0){
-        if(EVP_DigestUpdate(mdctx, buffer, bytesRead) != 1){
-          perror("EVP_DigestUpdate");
+      while ((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        if (EVP_DigestUpdate(mdctx, buffer, bytesRead) != 1) {
           EVP_MD_CTX_free(mdctx);
           fclose(file);
-          return NULL;
+          fatal_error("EVP_DigestUpdate() failed");
         }
       }
 
-      //Finalize Hash Calculation
+      // Finalize Hash Calculation
       unsigned char hash[EVP_MAX_MD_SIZE];
       unsigned int hashLength;
       if(EVP_DigestFinal_ex(mdctx, hash, &hashLength) != 1){
@@ -327,6 +325,8 @@ char* calculateSHA256(const char* filePath){
         fclose(file);
         fatal_error("malloc() failed for hashString");
       }
+
+      memset(hashString, 0, hashLength * 2 + 1);
 
       for(unsigned int i = 0; i < hashLength; i++){
         sprintf(hashString + (i * 2), "%02x", hash[i]);
