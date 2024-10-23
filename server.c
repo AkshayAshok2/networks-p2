@@ -76,7 +76,7 @@ int main(int argc, char *argv[])
 
       ListMessageResponse *serverFiles;
 
-      servPort = 25000;
+      servPort = 60000;
 
       // Create new TCP Socket for incoming requests
       if ((serverSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
@@ -105,157 +105,165 @@ int main(int argc, char *argv[])
         // Inner loop to process commands on existing connection
         while (1) {
           int bytesReceived;
-          uint8_t switchValue;
+          uint8_t command;
 
-          if ((bytesReceived = recv(clientSock, &switchValue, 1, 0)) < 0)
+          if ((bytesReceived = recv(clientSock, &command, 1, 0)) < 0)
             fatal_error("recv() failed");
           else if (bytesReceived == 0)
             fatal_error("Connection closed by client.");
 
-          printf("Received menu choice: %u\n", switchValue);
+          printf("Received menu choice: %u\n", command);
 
-          switch (switchValue)
-          {
-            case 1:
-              /* ---------- LIST ---------- */
-              serverFiles = getFileNamesAndHashes(&fileCount);
+          if (command == 1) {
+            /* ---------- LIST ---------- */
+            serverFiles = getFileNamesAndHashes(&fileCount);
 
-              if (serverFiles == NULL)
-                fatal_error("getFileNamesAndHashes() failed");
+            if (serverFiles == NULL)
+              fatal_error("getFileNamesAndHashes() failed");
 
-              int totalSize = sizeof(uint8_t) + fileCount * sizeof(ListMessageResponse);
-              char *buffer = (char *)malloc(totalSize);
-              
-              if (buffer == NULL) {
-                fatal_error("malloc() failed for buffer");
-              }
+            int totalSize = sizeof(uint8_t) + fileCount * (2 * sizeof(uint8_t) + 2 *RCVBUFSIZE);
+            char *buffer = (char *)malloc(totalSize);
+            
+            if (buffer == NULL) {
+              fatal_error("malloc() failed for buffer");
+            }
 
-              memset(buffer, 0, totalSize);
+            memset(buffer, 0, totalSize);
 
-              // Serialize the data
-              int offset = 0;
-              memcpy(buffer, &fileCount, sizeof(uint8_t));
+            // Serialize the data
+            int offset = 0;
+            memcpy(buffer, &fileCount, sizeof(uint8_t));
+            offset += sizeof(uint8_t);
+
+            for (int i = 0; i < fileCount; i++) {
+              memcpy(buffer + offset, &serverFiles[i].fileNameBytes, sizeof(uint8_t));
               offset += sizeof(uint8_t);
+              memcpy(buffer + offset, serverFiles[i].fileName, RCVBUFSIZE);
+              offset += RCVBUFSIZE;
+              memcpy(buffer + offset, &serverFiles[i].fileHashBytes, sizeof(uint8_t));
+              offset += sizeof(uint8_t);
+              memcpy(buffer + offset, serverFiles[i].fileHash, RCVBUFSIZE);
+              offset += RCVBUFSIZE;
+            }
 
-              for (int i = 0; i < fileCount; i++) {
-                memcpy(buffer + offset, &serverFiles[i], sizeof(ListMessageResponse));
-                offset += sizeof(ListMessageResponse);
-              }
+            // Send the data
+            int totalBytesSent = 0;
+            int bytesSent;
 
-              // Send the data
-              int totalBytesSent = 0;
-              int bytesSent;
+            while (totalBytesSent < totalSize) {
+                bytesSent = send(clientSock, buffer + totalBytesSent, totalSize - totalBytesSent, 0);
 
-              while (totalBytesSent < totalSize) {
-                  bytesSent = send(clientSock, buffer + totalBytesSent, totalSize - totalBytesSent, 0);
+                if (bytesSent < 0) {
+                    fatal_error("send() failed");
+                }
+                else if (bytesSent == 0) {
+                    fatal_error("Connection closed by client.\n");
+                }
 
-                  if (bytesSent < 0) {
-                      fatal_error("send() failed");
-                  }
-                  else if (bytesSent == 0) {
-                      fatal_error("Connection closed by client.\n");
-                  }
+                totalBytesSent += bytesSent;
+            }
 
-                  totalBytesSent += bytesSent;
-              }
+            free(buffer);
+            buffer = NULL;
+          } else if (command == 3) {
+            /* ---------- PULL ---------- */
+            uint8_t diffFileCount;
+            int bytesReceived = recv(clientSock, &diffFileCount, sizeof(uint8_t), 0);
 
-              free(buffer);
-              break;
-            case 3:
-              /* ---------- PULL ---------- */
-              uint8_t diffFileCount;
-              uint8_t bytesReceived = recv(clientSock, diffFileCount, sizeof(uint8_t), 0);
+            if (bytesReceived < 0)
+              fatal_error("Initial recv() failed");
+            else if (bytesReceived == 0)
+              fatal_error("Connection closed by server for first byte.\n");
+
+            printf("Number of files to pull: %d\n", diffFileCount);
+
+            uint32_t totalMessageSize = diffFileCount * (2 * sizeof(uint8_t) + 2 * RCVBUFSIZE);
+
+            if (rcvBuf != NULL) {
+              free(rcvBuf);
+              rcvBuf = NULL;
+            }
+
+            rcvBuf = (char *)malloc(totalMessageSize);
+
+            if (rcvBuf == NULL)
+              fatal_error("malloc() failed for rcvBuf");
+
+            memset(rcvBuf, 0, totalMessageSize);
+            int totalBytesReceived = 0;
+
+            // Receive DIFF from client
+            while (totalBytesReceived < totalMessageSize) {
+              bytesReceived = recv(clientSock, rcvBuf + totalBytesReceived, totalMessageSize - totalBytesReceived, 0);
 
               if (bytesReceived < 0)
-                fatal_error("Initial recv() failed");
-              else if (bytesReceived == 0)
-                fatal_error("Connection closed by server for first byte.\n");
-
-              uint32_t totalMessageSize = diffFileCount * sizeof(DiffMessage);
-
-              if (rcvBuf != NULL)
-                free(rcvBuf);
-
-              rcvBuf = (char *)malloc(totalMessageSize);
-
-              if (rcvBuf == NULL)
-                fatal_error("malloc() failed for rcvBuf");
-
-              memset(rcvBuf, 0, totalMessageSize);
-              int totalBytesReceived = 0;
-
-              while (totalBytesReceived < totalMessageSize) {
-                bytesReceived = recv(clientSock, rcvBuf + totalBytesReceived, totalMessageSize - totalBytesReceived, 0);
-
-                if (bytesReceived < 0)
-                  fatal_error("recv() for file names and hashes failed");
-                else if (bytesReceived == 0)
-                  printf("??? stopping here.\n");
-                  break;
-
-                totalBytesReceived += bytesReceived;
+                fatal_error("recv() for file names and hashes failed");
+              else if (bytesReceived == 0) {
+                printf("Total bytes received: %d\nTotal message size: %d", totalBytesReceived, totalMessageSize);
+                fatal_error("Connection closed by client?");
               }
 
-              DiffMessage *diffFiles = (DiffMessage *)malloc(totalMessageSize);
+              totalBytesReceived += bytesReceived;
+            }
 
-              if (diffFiles == NULL)
-                fatal_error("malloc() failed for serverFiles");
+            DiffMessage *diffFiles = (DiffMessage *)malloc(totalMessageSize);
 
-              int offset = 0;
+            if (diffFiles == NULL)
+              fatal_error("malloc() failed for serverFiles");
 
-              // Deserialize each listMessageResponse
-              for (int i = 0; i < diffFileCount; i++) {
-                DiffMessage *diffFile = &diffFiles[i];
+            memset(diffFiles, 0, totalMessageSize);
+            int offset = 0;
 
-                memset(diffFile, 0, sizeof(DiffMessage));
+            // Deserialize each listMessageResponse
+            for (int i = 0; i < diffFileCount; i++) {
+              DiffMessage *diffFile = &diffFiles[i];
 
-                // Deserialize fileNameBytes
-                memcpy(&diffFile->fileHashBytes, rcvBuf + offset, sizeof(uint8_t));
-                offset += sizeof(uint8_t);
+              // Deserialize fileNameBytes
+              memcpy(&diffFile->fileNameBytes, rcvBuf + offset, sizeof(uint8_t));
+              offset += sizeof(uint8_t);
 
-                // Deserialize fileName
-                memcpy(diffFile->fileHash, rcvBuf + offset, diffFile->fileHashBytes);
-                offset += RCVBUFSIZE;
+              // Deserialize fileName
+              memcpy(diffFile->fileName, rcvBuf + offset, diffFile->fileNameBytes);
+              offset += RCVBUFSIZE;
 
-                // Deserialize fileHashBytes
-                memcpy(&diffFile->fileHashBytes, rcvBuf + offset, sizeof(uint8_t));
-                offset += sizeof(uint8_t);
+              // Deserialize fileHashBytes
+              memcpy(&diffFile->fileHashBytes, rcvBuf + offset, sizeof(uint8_t));
+              offset += sizeof(uint8_t);
 
-                // Deserialize fileHash
-                memcpy(diffFile->fileHash, rcvBuf + offset, diffFile->fileHashBytes);
-                offset += RCVBUFSIZE;
-              }
+              // Deserialize fileHash
+              memcpy(diffFile->fileHash, rcvBuf + offset, diffFile->fileHashBytes);
+              offset += RCVBUFSIZE;
+            }
 
-              free(rcvBuf);
+            free(rcvBuf);
+            rcvBuf = NULL;
 
-              // Send number of files being sent to client
-              if (send(clientSock, &diffFileCount, sizeof(uint8_t), 0) != sizeof(uint8_t))
-                fatal_error("send() for diffFileCount sent unexpected number of bytes");
+            // Send number of files being sent to client
+            if (send(clientSock, &diffFileCount, sizeof(uint8_t), 0) != sizeof(uint8_t))
+              fatal_error("send() for diffFileCount sent unexpected number of bytes");
 
-              // Send all files with hashes to the client
-              for (int i = 0; i < diffFileCount; i++) {
-                sendSingleFile(clientSock, diffFiles[i].fileName, diffFiles[i].fileNameBytes);
-              }
+            // Send all files with hashes to the client
+            for (int i = 0; i < diffFileCount; i++) {
+              sendSingleFile(clientSock, diffFiles[i].fileName, diffFiles[i].fileNameBytes);
+            }
 
-              free(diffFiles);
-              break;
-            case 4:
+            free(diffFiles);
+            diffFiles = NULL;
+          } else if (command == 4) {
               /* ---------- LEAVE ---------- */
               if (serverFiles != NULL) {
                 free(serverFiles);
+                serverFiles = NULL;
               }
 
               close(clientSock);
               break;
-            default:
+          } else {
               /* ---------- Invalid option ---------- */
               printf("Client send invalid option. Exiting...\n");
               close(clientSock);
               break;
           }
-
-          if (switchValue == 4)
-            break;
         }
       }
 
@@ -313,11 +321,11 @@ char* calculateSHA256(const char* filePath){
 
       // Convert hash to hexadecimal
       char* hashString = malloc(hashLength * 2 + 1);
+
       if(hashString == NULL){
-        perror("malloc");
         EVP_MD_CTX_free(mdctx);
         fclose(file);
-        return NULL;
+        fatal_error("malloc() failed for hashString");
       }
 
       for(unsigned int i = 0; i < hashLength; i++){
@@ -343,16 +351,15 @@ ListMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
     ListMessageResponse* fileInfos = malloc(capacity * sizeof(ListMessageResponse));
 
     if (fileInfos == NULL) {
-        perror("malloc");
-        return NULL;
+        fatal_error("malloc");
     }
 
     memset(fileInfos, 0, capacity * sizeof(ListMessageResponse));
 
     if ((currentDir = opendir(DATA_DIR)) == NULL) {
-        perror("opendir() error");
         free(fileInfos);
-        return NULL;
+        fileInfos = NULL;
+        fatal_error("opendir() error");
     }
     
     // Loop through each entry in the directory
@@ -365,7 +372,6 @@ ListMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
             if (currFileCount >= capacity) {
                 int newCapacity = capacity * 2;
                 ListMessageResponse* temp = realloc(fileInfos, newCapacity * sizeof(ListMessageResponse));
-                memset(temp + capacity, 0, capacity * sizeof(ListMessageResponse));
 
                 if (temp == NULL) {
                     perror("realloc");
@@ -373,6 +379,8 @@ ListMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
                     free(fileInfos);
                     return NULL;
                 }
+
+                memset(temp + capacity, 0, capacity * sizeof(ListMessageResponse));
 
                 fileInfos = temp;
                 capacity = newCapacity;
@@ -408,7 +416,10 @@ ListMessageResponse* getFileNamesAndHashes(uint8_t *fileCount) {
 // Send single file to client
 void sendSingleFile(int clientSock, const char *fileName, uint8_t fileNameBytes) {
     char *sndBuf;
-    int file_fd = open(fileName, O_RDONLY);
+    char filePath[RCVBUFSIZE];
+
+    snprintf(filePath, sizeof(filePath), "%s/%s", DATA_DIR, fileName);
+    int file_fd = open(filePath, O_RDONLY);
 
     if (file_fd == -1) {
       fatal_error("Failed to open file on server");
@@ -421,38 +432,61 @@ void sendSingleFile(int clientSock, const char *fileName, uint8_t fileNameBytes)
     }
 
     uint32_t fileSize = file_stat.st_size;
+    printf("File size: %d\n", fileSize);
+
+    // Prepare buffer
+    int headerMessageSize = sizeof(uint8_t) + RCVBUFSIZE + sizeof(uint32_t);
+    sndBuf = (char *)malloc(headerMessageSize);
 
     if (sndBuf == NULL) {
       close(file_fd);
-      fatal_error("malloc() failed");
+      fatal_error("malloc() failed for sndBuf");
     }
 
-    send(clientSock, &fileSize, sizeof(uint32_t), 0);
-
-    PullMessageResponse fileToSend;
-    fileToSend.fileNameBytes = fileNameBytes;
-    strncpy(fileToSend.fileName, fileName, fileNameBytes);
-    fileToSend.fileContentsBytes = fileSize;
-
-    // Prepare buffer
-    int totalMessageSize = sizeof(uint8_t) + fileNameBytes + sizeof(uint32_t) + fileSize;
-    sndBuf = (char *)malloc(totalMessageSize);
-    memset(sndBuf, 0, totalMessageSize);
+    memset(sndBuf, 0, headerMessageSize);
 
     // Write fileNameBytes, fileName, and fileContentsBytes to buffer
     int offset = 0;
-    memcpy(sndBuf, &fileToSend.fileNameBytes, sizeof(uint8_t));
+    memcpy(sndBuf, &fileNameBytes, sizeof(uint8_t));
     offset += sizeof(uint8_t);
-    memcpy(sndBuf + offset, fileToSend.fileName, fileToSend.fileNameBytes);
-    offset += fileToSend.fileNameBytes;
-    memcpy(sndBuf + offset, &fileToSend.fileContentsBytes, sizeof(uint32_t));
-    offset += sizeof(uint32_t);
+    memcpy(sndBuf + offset, fileName, fileNameBytes);
+    offset += RCVBUFSIZE;
+    memcpy(sndBuf + offset, &fileSize, sizeof(uint32_t));
 
+    // Send file header fields to client
+    int totalBytesSent = 0;
+    int bytesSent;
+
+    while (totalBytesSent < headerMessageSize) {
+        bytesSent = send(clientSock, sndBuf + totalBytesSent, headerMessageSize - totalBytesSent, 0);
+
+        if (bytesSent < 0) {
+          fatal_error("send() failed");
+        } else if (bytesSent == 0) {
+          fatal_error("Connection closed by client (or something).\n");
+        }
+
+        totalBytesSent += bytesSent;
+    }
+
+    free(sndBuf);
+
+    // Prepare buffer for file contents
+    sndBuf = (char *)malloc(fileSize);
+
+    if (sndBuf == NULL) {
+      close(file_fd);
+      fatal_error("malloc() failed for sndBuf");
+    }
+    
+    memset(sndBuf, 0, fileSize);
+
+    // Read in file content to buffer
     int totalBytesRead = 0;
     int bytesRead;
 
     while (totalBytesRead < fileSize) {
-      if ((bytesRead = read(file_fd, sndBuf + offset + totalBytesRead, fileSize - totalBytesRead)) > 0) {
+      if ((bytesRead = read(file_fd, sndBuf + totalBytesRead, fileSize - totalBytesRead)) > 0) {
         totalBytesRead += bytesRead;
       } else if (bytesRead < 0) {
         free(sndBuf);
@@ -465,6 +499,8 @@ void sendSingleFile(int clientSock, const char *fileName, uint8_t fileNameBytes)
       }
     }
 
+    printf("Total bytes read: %d\n", totalBytesRead);
+
     if (bytesRead < 0) {
       free(sndBuf);
       close(file_fd);
@@ -474,21 +510,21 @@ void sendSingleFile(int clientSock, const char *fileName, uint8_t fileNameBytes)
     close(file_fd);
 
     // Send buffer to client
-    int totalBytesSent = 0;
-    int bytesSent;
+    totalBytesSent = 0;
 
-    while (totalBytesSent < totalMessageSize) {
-        bytesSent = send(clientSock, sndBuf + totalBytesSent, totalMessageSize - totalBytesSent, 0);
+    while (totalBytesSent < fileSize) {
+        bytesSent = send(clientSock, sndBuf + totalBytesSent, fileSize - totalBytesSent, 0);
 
         if (bytesSent < 0) {
-            fatal_error("send() failed");
+          fatal_error("send() failed");
         }
         else if (bytesSent == 0) {
-            fatal_error("Connection closed by client (or something).\n");
+          fatal_error("Connection closed by client (or something).\n");
         }
 
         totalBytesSent += bytesSent;
     }
 
+    printf("Total bytes sent: %d\n", totalBytesSent);
     free(sndBuf);
 }
